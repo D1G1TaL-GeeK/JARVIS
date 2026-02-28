@@ -1,6 +1,5 @@
-use std::io::{self, Write};
-
 use crate::interfaces::{Informer, Listener};
+use crate::platform;
 use crate::types::{ReplyKind, UserRequest};
 
 // Этот модуль отвечает за консольный ввод/вывод.
@@ -22,25 +21,11 @@ impl ConsoleListener {
 impl Listener for ConsoleListener {
     fn listen(&mut self) -> Result<Option<UserRequest>, String> {
         // Явный prompt помогает видеть границу между запросами.
-        print!("you> ");
+        platform::print_text("you> ")?;
 
-        // `flush()` нужен потому, что без него prompt может остаться в буфере
-        // и не показаться пользователю до чтения строки.
-        io::stdout()
-            .flush()
-            .map_err(|error| format!("Не удалось сбросить stdout: {error}"))?;
-
-        let mut buffer = String::new();
-
-        let bytes_read = io::stdin()
-            .read_line(&mut buffer)
-            .map_err(|error| format!("Не удалось прочитать строку из stdin: {error}"))?;
-
-        // `0` байт означает EOF: поток закрыт.
-        // Это нормальная ситуация, а не ошибка.
-        if bytes_read == 0 {
+        let Some(buffer) = platform::read_line()? else {
             return Ok(None);
-        }
+        };
 
         Ok(Some(UserRequest::new(buffer)))
     }
@@ -73,7 +58,9 @@ impl Informer for ConsoleInformer {
         let clean_message = message.trim_end();
         let prefix = Self::prefix_for(kind);
 
-        println!("{}[{prefix}]> {clean_message}", self.assistant_name);
-        Ok(())
+        platform::print_line(&format!(
+            "{}[{prefix}]> {clean_message}",
+            self.assistant_name
+        ))
     }
 }

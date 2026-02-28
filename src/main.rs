@@ -21,6 +21,15 @@ fn main() {
         eprintln!("Предупреждение: не удалось включить UTF-8 для консоли: {error}");
     }
 
+    // Печатаем предупреждения только ASCII-символами,
+    // чтобы они были читаемы даже в "плохой" консоли.
+    for warning in platform::startup_warnings() {
+        if let Err(error) = platform::print_line(&format!("JARVIS[WARN]> {warning}")) {
+            eprintln!("JARVIS[WARN]> {warning}");
+            eprintln!("Warning output fallback failed: {error}");
+        }
+    }
+
     // Создаем конкретные реализации наших "интерфейсов".
     //
     // Аналогия с C++:
