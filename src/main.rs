@@ -2,11 +2,13 @@
 // В маленьком Rust-проекте так обычно и начинают:
 // один бинарник и несколько файлов с логически разнесенной ответственностью.
 mod assistant;
+mod audio;
 mod brain;
 mod console;
 mod executor;
 mod interfaces;
 mod platform;
+mod shutdown;
 mod types;
 
 use assistant::Assistant;
@@ -15,6 +17,10 @@ use console::{ConsoleInformer, ConsoleListener};
 use executor::LocalExecutor;
 
 fn main() {
+    if let Err(error) = shutdown::install_ctrlc_handler() {
+        eprintln!("Предупреждение: не удалось установить graceful shutdown для Ctrl+C: {error}");
+    }
+
     // Для русскоязычного интерфейса на Windows это особенно важно.
     // Без явного перевода консоли в UTF-8 ввод и вывод могут превратиться в `????`.
     if let Err(error) = platform::enable_utf8_console() {
@@ -35,7 +41,8 @@ fn main() {
     // Аналогия с C++:
     // - `ConsoleListener` похож на класс, который умеет читать ввод;
     // - `RuleBasedBrain` похож на простейший модуль принятия решений;
-    // - `LocalExecutor` исполняет безопасные локальные действия;
+    // - `LocalExecutor` исполняет безопасные локальные действия,
+    //   а теперь еще умеет записывать короткий фрагмент с микрофона;
     // - `ConsoleInformer` выводит ответы пользователю.
     let listener = Box::new(ConsoleListener::new());
     let brain = Box::new(RuleBasedBrain::new("JARVIS"));

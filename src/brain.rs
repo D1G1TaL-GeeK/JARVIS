@@ -28,6 +28,10 @@ impl RuleBasedBrain {
 - помощь\n\
 - который час\n\
 - покажи файлы\n\
+- слушай <секунды>\n\
+- запиши <секунды>\n\
+- прослушай запись\n\
+- проиграй запись\n\
 - повтори <текст>\n\
 - предложи команду\n\
 - выход",
@@ -48,6 +52,14 @@ impl RuleBasedBrain {
             return "Попробуй команду: `повтори привет, я изучаю Rust`.".to_string();
         }
 
+        if text.contains("слуш") || text.contains("запиш") || text.contains("микрофон") {
+            return "Попробуй голосовую команду: `слушай 5`.".to_string();
+        }
+
+        if text.contains("запись") || text.contains("проигр") || text.contains("прослуш") {
+            return "После записи можно ввести `прослушай запись`.".to_string();
+        }
+
         "Можно начать с одной из команд: `который час`, `покажи файлы`, `повтори привет`, `выход`."
             .to_string()
     }
@@ -64,6 +76,69 @@ impl RuleBasedBrain {
         }
 
         None
+    }
+
+    fn parse_recording_duration(&self, text: &str) -> Result<Option<u32>, String> {
+        // На этом шаге поддерживаем очень простой формат:
+        // `слушай 5` или `запиши 5`.
+        //
+        // Так проще понять и парсер, и `match` в executor,
+        // чем сразу строить сложный CLI-язык.
+        let mut parts = text.split_whitespace();
+        let Some(command) = parts.next() else {
+            return Ok(None);
+        };
+
+        if command != "слушай" && command != "запиши" && command != "record" {
+            return Ok(None);
+        }
+
+        let Some(seconds_text) = parts.next() else {
+            return Err(
+                "Для записи укажи длительность, например: `слушай 5` или `запиши 5`."
+                    .to_string(),
+            );
+        };
+
+        if parts.next().is_some() {
+            return Err(
+                "Пока поддерживается только формат `слушай <секунды>`, например `слушай 5`."
+                    .to_string(),
+            );
+        }
+
+        let duration_secs = seconds_text.parse::<u32>().map_err(|_| {
+            "Не удалось понять длительность записи. Пример правильной команды: `слушай 5`."
+                .to_string()
+        })?;
+
+        if duration_secs == 0 {
+            return Err("Длительность записи должна быть больше нуля.".to_string());
+        }
+
+        if duration_secs > 30 {
+            return Err(
+                "Для первого шага ограничим запись 30 секундами. Попробуй, например, `слушай 5`."
+                    .to_string(),
+            );
+        }
+
+        Ok(Some(duration_secs))
+    }
+
+    fn is_play_last_recording_command(&self, text: &str) -> bool {
+        // Не смешиваем эту команду с `слушай 5`.
+        // Здесь нас интересуют только явные формулировки воспроизведения записи.
+        let patterns = [
+            "прослушай запись",
+            "проиграй запись",
+            "воспроизведи запись",
+            "проиграй последнюю запись",
+            "воспроизведи последнюю запись",
+            "play recording",
+        ];
+
+        patterns.iter().any(|pattern| text == *pattern)
     }
 }
 
@@ -97,6 +172,26 @@ impl Brain for RuleBasedBrain {
             return Decision::execute(
                 "Считываю содержимое текущей директории.",
                 Action::ListCurrentDirectory,
+            );
+        }
+
+        match self.parse_recording_duration(text) {
+            Ok(Some(duration_secs)) => {
+                return Decision::execute(
+                    format!(
+                        "Начинаю запись с микрофона на {duration_secs} сек. Говори сразу после этой строки."
+                    ),
+                    Action::RecordMicrophoneClip { duration_secs },
+                );
+            }
+            Ok(None) => {}
+            Err(error) => return Decision::inform(error),
+        }
+
+        if self.is_play_last_recording_command(text) {
+            return Decision::execute(
+                "Пробую воспроизвести последнюю сохраненную запись.",
+                Action::PlayLastRecording,
             );
         }
 

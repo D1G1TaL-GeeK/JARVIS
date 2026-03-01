@@ -24,6 +24,15 @@ pub trait Executor {
     // Это важно: Brain решает "что делать",
     // а Executor отвечает за "как именно это сделать".
     fn execute(&mut self, action: &Action) -> Result<String, String>;
+
+    // Отдельный hook на завершение полезен для cleanup-вещей:
+    // временных файлов, кэша, открытых ресурсов и т.д.
+    //
+    // Здесь есть default-реализация, чтобы не заставлять каждый executor
+    // обязательно что-то делать на shutdown.
+    fn shutdown(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub trait Informer {

@@ -15,6 +15,8 @@
 
 use std::io::{self, Write};
 
+use crate::shutdown;
+
 #[cfg(windows)]
 use std::env;
 
@@ -37,6 +39,15 @@ unsafe extern "system" {
         chars_written: *mut u32,
         reserved: *mut core::ffi::c_void,
     ) -> i32;
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ConsoleReadConsoleControl {
+    n_length: u32,
+    n_initial_chars: u32,
+    dw_ctrl_wakeup_mask: u32,
+    dw_control_key_state: u32,
 }
 
 #[cfg(windows)]
@@ -75,6 +86,9 @@ const STD_INPUT_HANDLE: u32 = -10_i32 as u32;
 
 #[cfg(windows)]
 const STD_OUTPUT_HANDLE: u32 = -11_i32 as u32;
+
+#[cfg(windows)]
+const CTRL_C_WAKE_MASK: u32 = 1 << 3;
 
 #[cfg(windows)]
 fn get_std_handle(kind: u32) -> Result<isize, String> {
@@ -146,13 +160,23 @@ pub fn print_line(text: &str) -> Result<(), String> {
 
 #[cfg(windows)]
 pub fn read_line() -> Result<Option<String>, String> {
+    if shutdown::is_requested() {
+        return Ok(None);
+    }
+
     let handle = get_std_handle(STD_INPUT_HANDLE)?;
 
     if !is_console_handle(handle) {
         let mut buffer = String::new();
-        let bytes_read = io::stdin()
-            .read_line(&mut buffer)
-            .map_err(|error| format!("Не удалось прочитать строку из stdin: {error}"))?;
+        let bytes_read = match io::stdin().read_line(&mut buffer) {
+            Ok(bytes_read) => bytes_read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted && shutdown::is_requested() => {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(format!("Не удалось прочитать строку из stdin: {error}"));
+            }
+        };
 
         if bytes_read == 0 {
             return Ok(None);
@@ -161,10 +185,24 @@ pub fn read_line() -> Result<Option<String>, String> {
         return Ok(Some(buffer));
     }
 
+    let mut input_control = ConsoleReadConsoleControl {
+        n_length: std::mem::size_of::<ConsoleReadConsoleControl>() as u32,
+        n_initial_chars: 0,
+        dw_ctrl_wakeup_mask: CTRL_C_WAKE_MASK,
+        dw_control_key_state: 0,
+    };
+
     // Для интерактивной консоли читаем UTF-16 напрямую через WinAPI.
     // Буфер небольшой, но этого достаточно для командного режима.
     let mut buffer = vec![0_u16; 256];
     let mut chars_read = 0_u32;
+
+    let output_handle = get_std_handle(STD_OUTPUT_HANDLE)?;
+    let input_control_ptr = if is_console_handle(output_handle) {
+        &mut input_control as *mut ConsoleReadConsoleControl as *mut core::ffi::c_void
+    } else {
+        std::ptr::null_mut()
+    };
 
     let result = unsafe {
         ReadConsoleW(
@@ -172,15 +210,23 @@ pub fn read_line() -> Result<Option<String>, String> {
             buffer.as_mut_ptr(),
             buffer.len() as u32,
             &mut chars_read,
-            std::ptr::null_mut(),
+            input_control_ptr,
         )
     };
 
     if result == 0 {
+        if shutdown::is_requested() {
+            return Ok(None);
+        }
+
         return Err("ReadConsoleW завершился неудачно".to_string());
     }
 
     if chars_read == 0 {
+        return Ok(None);
+    }
+
+    if shutdown::is_requested() {
         return Ok(None);
     }
 
@@ -218,10 +264,20 @@ pub fn print_line(text: &str) -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn read_line() -> Result<Option<String>, String> {
+    if shutdown::is_requested() {
+        return Ok(None);
+    }
+
     let mut buffer = String::new();
-    let bytes_read = io::stdin()
-        .read_line(&mut buffer)
-        .map_err(|error| format!("Не удалось прочитать строку из stdin: {error}"))?;
+    let bytes_read = match io::stdin().read_line(&mut buffer) {
+        Ok(bytes_read) => bytes_read,
+        Err(error) if error.kind() == io::ErrorKind::Interrupted && shutdown::is_requested() => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(format!("Не удалось прочитать строку из stdin: {error}"));
+        }
+    };
 
     if bytes_read == 0 {
         return Ok(None);

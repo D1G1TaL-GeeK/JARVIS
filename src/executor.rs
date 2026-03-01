@@ -1,9 +1,14 @@
 use std::env;
 use std::fs;
-use std::process::Command;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::audio::MicrophoneRecorder;
 use crate::interfaces::Executor;
+use crate::shutdown;
 use crate::types::Action;
 
 // Executor — место, где мы превращаем абстрактное решение
@@ -17,12 +22,16 @@ use crate::types::Action;
 
 pub struct LocalExecutor {
     max_visible_entries: usize,
+    microphone_recorder: MicrophoneRecorder,
+    last_recording_path: Option<PathBuf>,
 }
 
 impl LocalExecutor {
     pub fn new() -> Self {
         Self {
             max_visible_entries: 12,
+            microphone_recorder: MicrophoneRecorder::new(),
+            last_recording_path: None,
         }
     }
 
@@ -118,6 +127,148 @@ impl LocalExecutor {
 
         Ok(message)
     }
+
+    fn record_microphone_clip(&mut self, duration_secs: u32) -> Result<String, String> {
+        // На этом шаге мы сознательно не делаем потоковую обработку,
+        // VAD или распознавание речи.
+        //
+        // Цель проще:
+        // - взять звук с микрофона;
+        // - положить его в обычный WAV;
+        // - показать пользователю, что "listen" часть конвейера уже реальна.
+        let summary = self.microphone_recorder.record_clip(duration_secs)?;
+        self.last_recording_path = Some(summary.output_path.clone());
+
+        Ok(format!(
+            "Запись завершена.\n\
+Устройство: {}\n\
+Файл: {}\n\
+Формат: {} Hz, {} канал(а), 16-bit PCM\n\
+Сэмплов записано: {}\n\
+Примерная длительность: {:.2} сек.\n\
+Чтобы прослушать последнюю запись, введи `прослушай запись`.",
+            summary.device_name,
+            summary.output_path.display(),
+            summary.sample_rate,
+            summary.channels,
+            summary.captured_samples,
+            summary.approx_duration_secs
+        ))
+    }
+
+    fn play_last_recording(&self) -> Result<String, String> {
+        let Some(path) = self.last_recording_path.as_ref() else {
+            return Err(
+                "Пока нет последней записи для воспроизведения. Сначала выполни `слушай 5`."
+                    .to_string(),
+            );
+        };
+
+        self.play_wav_file(path)?;
+
+        Ok(format!(
+            "Воспроизведение завершено.\nФайл: {}",
+            path.display()
+        ))
+    }
+
+    fn play_wav_file(&self, path: &Path) -> Result<(), String> {
+        if !path.exists() {
+            return Err(format!(
+                "Файл последней записи не найден: {}",
+                path.display()
+            ));
+        }
+
+        let full_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            env::current_dir()
+                .map_err(|error| format!("Не удалось получить текущую директорию: {error}"))?
+                .join(path)
+        };
+
+        let escaped_path = full_path
+            .to_string_lossy()
+            // Одинарные кавычки внутри PowerShell-строки нужно дублировать.
+            .replace('\'', "''");
+
+        // Для временного debug-режима используем встроенный в Windows
+        // `System.Media.SoundPlayer`.
+        //
+        // Это не идеальный финальный аудио-стек, но отличный практический
+        // компромисс для текущего этапа:
+        // - без новых зависимостей;
+        // - работает локально;
+        // - синхронно воспроизводит WAV и дает быстрый feedback.
+        let script = [
+            &format!("$path = '{escaped_path}'"),
+            "$player = New-Object System.Media.SoundPlayer $path",
+            "$player.Load()",
+            "$player.PlaySync()",
+        ]
+        .join("; ");
+
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Не удалось запустить PowerShell для воспроизведения: {error}"))?;
+
+        loop {
+            if shutdown::is_requested() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Воспроизведение было прервано сигналом Ctrl+C.".to_string());
+            }
+
+            let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("Не удалось дождаться завершения плеера: {error}"))?
+            else {
+                thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            };
+
+            let mut stdout = String::new();
+            if let Some(mut stdout_pipe) = child.stdout.take() {
+                let _ = stdout_pipe.read_to_string(&mut stdout);
+            }
+
+            let mut stderr = String::new();
+            if let Some(mut stderr_pipe) = child.stderr.take() {
+                let _ = stderr_pipe.read_to_string(&mut stderr);
+            }
+
+            if status.success() {
+                return Ok(());
+            }
+
+            let stderr = stderr.trim().to_string();
+            let stdout = stdout.trim().to_string();
+
+            let details = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                "PowerShell завершился с ошибкой без текста.".to_string()
+            };
+
+            return Err(format!(
+                "Не удалось воспроизвести WAV-файл через системный плеер: {details}"
+            ));
+        }
+    }
+
+    fn cleanup_temporary_recordings(&mut self) -> Result<(), String> {
+        // Все записи в текущей версии считаются временными debug-артефактами.
+        // Поэтому при завершении ассистента просто очищаем всю директорию `recordings`.
+        let _deleted_entries = self.microphone_recorder.cleanup_recordings()?;
+        self.last_recording_path = None;
+        Ok(())
+    }
 }
 
 impl Executor for LocalExecutor {
@@ -125,7 +276,15 @@ impl Executor for LocalExecutor {
         match action {
             Action::ShowLocalTime => Ok(format!("Сейчас {}.", self.local_time_string())),
             Action::ListCurrentDirectory => self.list_current_directory(),
+            Action::RecordMicrophoneClip { duration_secs } => {
+                self.record_microphone_clip(*duration_secs)
+            }
+            Action::PlayLastRecording => self.play_last_recording(),
             Action::RepeatText(text) => Ok(format!("Повторяю: {text}")),
         }
+    }
+
+    fn shutdown(&mut self) -> Result<(), String> {
+        self.cleanup_temporary_recordings()
     }
 }
