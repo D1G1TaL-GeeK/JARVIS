@@ -33,17 +33,8 @@ if not defined JARVIS_CARGO (
     endlocal & exit /b 9009
 )
 
-for /f "tokens=2 delims=:." %%A in ('chcp') do set "JARVIS_OLD_CP=%%A"
-set "JARVIS_OLD_CP=%JARVIS_OLD_CP: =%"
-
-chcp 65001 >nul
-
 "%JARVIS_CARGO%" run
 set "JARVIS_EXIT_CODE=%ERRORLEVEL%"
-
-if defined JARVIS_OLD_CP (
-    chcp %JARVIS_OLD_CP% >nul
-)
 
 popd
 endlocal & exit /b %JARVIS_EXIT_CODE%

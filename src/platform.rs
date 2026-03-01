@@ -1,11 +1,10 @@
 // В этом модуле лежат платформенные детали.
 //
-// Изначально здесь была только попытка переключить консоль Windows в UTF-8.
-// Но на практике этого недостаточно для GNU-сборки Rust:
-// старая консоль Windows и стандартные потоки могут все равно давать `????`
-// вместо кириллицы.
+// На старте здесь была попытка принудительно переключать консоль в UTF-8.
+// Но в старом Windows PowerShell / conhost это может вести себя нестабильно:
+// на некоторых машинах начинают ломаться шрифты и кириллица.
 //
-// Поэтому ниже есть более надежный путь:
+// Поэтому для интерактивной консоли используем более надежный путь:
 // - если stdin/stdout действительно подключены к Windows Console,
 //   используем WinAPI-функции `ReadConsoleW` и `WriteConsoleW`;
 // - если ввод/вывод перенаправлены, спокойно падаем обратно в обычный stdio.
@@ -22,8 +21,6 @@ use std::env;
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn SetConsoleCP(code_page: u32) -> i32;
-    fn SetConsoleOutputCP(code_page: u32) -> i32;
     fn GetStdHandle(n_std_handle: u32) -> isize;
     fn GetConsoleMode(console_handle: isize, mode: *mut u32) -> i32;
     fn ReadConsoleW(
@@ -44,20 +41,12 @@ unsafe extern "system" {
 
 #[cfg(windows)]
 pub fn enable_utf8_console() -> Result<(), String> {
-    const UTF8_CODE_PAGE: u32 = 65001;
-
-    // `unsafe` здесь нужен потому, что мы вызываем WinAPI напрямую.
-    // Это нормальная ситуация для низкоуровневой платформенной интеграции.
-    let input_result = unsafe { SetConsoleCP(UTF8_CODE_PAGE) };
-    if input_result == 0 {
-        return Err("SetConsoleCP вернул 0".to_string());
-    }
-
-    let output_result = unsafe { SetConsoleOutputCP(UTF8_CODE_PAGE) };
-    if output_result == 0 {
-        return Err("SetConsoleOutputCP вернул 0".to_string());
-    }
-
+    // Намеренно ничего не меняем в глобальном состоянии консоли.
+    //
+    // В интерактивном режиме Unicode обеспечивается через
+    // `ReadConsoleW` / `WriteConsoleW`, а не через смену code page.
+    //
+    // Это снижает риск багов старого host-консоли Windows.
     Ok(())
 }
 
@@ -72,7 +61,8 @@ pub fn startup_warnings() -> Vec<&'static str> {
         return vec![
             "WARNING: THIS CONSOLE MAY NOT DISPLAY CYRILLIC CORRECTLY.",
             "IF YOU SEE QUESTION MARKS INSTEAD OF RUSSIAN TEXT, CHANGE THE CONSOLE FONT.",
-            "RECOMMENDED FONTS: CONSOLAS OR LUCIDA CONSOLE.",
+            "IF CONSOLAS IS UNSTABLE, TRY LUCIDA CONSOLE.",
+            "RECOMMENDED FONTS: LUCIDA CONSOLE OR CONSOLAS.",
             "RECOMMENDED HOST: WINDOWS TERMINAL.",
         ];
     }
